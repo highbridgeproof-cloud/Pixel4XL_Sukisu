@@ -1,0 +1,159 @@
+From: ChatGPT
+Subject: [PATCH] SukiSU: Linux 4.14 compatibility for builtin integration
+
+Base:
+  SukiSU-Ultra 9fbe8fe8ca90c62c259c5894bf96d02ac31209b
+
+Target:
+  Google coral android-msm-coral-4.14-android13
+
+This patch is intentionally limited to compatibility changes that match the
+source layout/API of the pinned SukiSU commit. It does not import Quartz's
+older task_prctl LSM implementation because the pinned SukiSU commit has a
+different generic lsm_hook implementation.
+
+---
+ kernel/feature/sucompat.c         | 6 +++---
+ kernel/manager/pkg_observer.c    | 2 +-
+ kernel/runtime/boot_event.c      | 24 +++++++++++++++++++++++-
+ kernel/runtime/ksud_integration.c | 2 +-
+ kernel/sulog/event.c             | 4 ++--
+ kernel/supercall/dispatch.c      | 3 +++
+ 6 files changed, 33 insertions(+), 8 deletions(-)
+
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -87,7 +87,7 @@ long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
+     char path[sizeof(su_path) + 1];
+     memset(path, 0, sizeof(path));
+-    strncpy_from_user_nofault(path, *filename_user, sizeof(path));
++    strncpy_from_user(path, *filename_user, sizeof(path));
+     if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+         old_cred = override_creds(ksu_cred);
+         if (is_ksud_exists()) {
+@@ -120,7 +120,7 @@ long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs)
+     filename_user = (const char __user **)&PT_REGS_PARM2(regs);
+     char path[sizeof(su_path) + 1];
+     memset(path, 0, sizeof(path));
+-    strncpy_from_user_nofault(path, *filename_user, sizeof(path));
++    strncpy_from_user(path, *filename_user, sizeof(path));
+     if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+         old_cred = override_creds(ksu_cred);
+         if (is_ksud_exists()) {
+
+diff --git a/kernel/manager/pkg_observer.c b/kernel/manager/pkg_observer.c
+--- a/kernel/manager/pkg_observer.c
++++ b/kernel/manager/pkg_observer.c
+@@ -7,7 +7,7 @@
+ #include <linux/version.h>
+ #include "klog.h" // IWYU pragma: keep
+ #include "manager/throne_tracker.h"
+-#define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
++#define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_MODIFY | FS_CLOSE_WRITE | FS_EVENT_ON_CHILD)
+
+ struct watch_dir {
+     const char *path;
+
+diff --git a/kernel/runtime/boot_event.c b/kernel/runtime/boot_event.c
+--- a/kernel/runtime/boot_event.c
++++ b/kernel/runtime/boot_event.c
+@@ -1,4 +1,5 @@
+ #include "feature/selinux_hide.h"
++#include <linux/workqueue.h>
+ #include <linux/err.h>
+ #include <linux/fs.h>
+ #include <linux/namei.h>
+@@ -10,6 +11,22 @@
+
+ bool ksu_module_mounted __read_mostly = false;
+ bool ksu_boot_completed __read_mostly = false;
+
++static struct delayed_work ksu_throne_retry_work;
++
++static void ksu_throne_retry_worker(struct work_struct *work)
++{
++    track_throne(false);
++}
++
+ void on_post_fs_data(void)
+ {
+     static bool done = false;
+@@ -24,10 +41,17 @@ void on_post_fs_data(void)
+     done = true;
+     pr_info("on_post_fs_data!\n");
+     ksu_load_allow_list();
+     ksu_observer_init();
+     // Sanity check for safe mode only needs early-boot input samples.
+     ksu_stop_input_hook_runtime();
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     ksu_selinux_hide_handle_post_fs_data();
++#endif
++    /*
++     * Builtin/non-GKI kernels do not necessarily have the userspace ksud
++     * bootstrap path available early enough to establish the manager
++     * ("throne") state.  Try immediately and once more after packages.list
++     * and the framework have settled.
++     */
++    track_throne(false);
++    INIT_DELAYED_WORK(&ksu_throne_retry_work, ksu_throne_retry_worker);
++    schedule_delayed_work(&ksu_throne_retry_work, msecs_to_jiffies(3000));
+ }
+@@ -58,8 +82,10 @@ void on_module_mounted(void)
+ void on_boot_completed(void)
+ {
+     ksu_boot_completed = true;
+     pr_info("on_boot_completed!\n");
+     track_throne(true);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     ksu_selinux_hide_drop_backup_if_unused();
++#endif
+ }
+
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -127,7 +127,7 @@ static bool check_argv(struct user_arg_ptr argv, int index, const char *expected, char *buf, size_t buf_len)
+     if (!p || IS_ERR(p))
+         goto fail;
+
+-    if (strncpy_from_user_nofault(buf, p, buf_len) <= 0)
++    if (strncpy_from_user(buf, p, buf_len) <= 0)
+         goto fail;
+
+     buf[buf_len - 1] = '\0';
+
+diff --git a/kernel/sulog/event.c b/kernel/sulog/event.c
+--- a/kernel/sulog/event.c
++++ b/kernel/sulog/event.c
+@@ -117,7 +117,7 @@ static __u32 ksu_sulog_copy_filename(const char __user *filename_user, char *dst, __u32 dst_len)
+     if (!filename_user)
+         return ksu_sulog_copy_empty_string(dst);
+
+-    ret = strncpy_from_user_nofault(dst, (const void __user *)untagged_addr((unsigned long)filename_user), dst_len);
++    ret = strncpy_from_user(dst, (const void __user *)untagged_addr((unsigned long)filename_user), dst_len);
+     if (ret <= 0)
+         return ksu_sulog_copy_empty_string(dst);
+
+@@ -155,7 +155,7 @@ static __u32 ksu_sulog_flatten_argv(const char __user *const __user *argv_user, char *dst, __u32 dst_len)
+             return ksu_sulog_copy_empty_string(dst);
+
+         copied =
+-            strncpy_from_user_nofault(arg, (const void __user *)untagged_addr((unsigned long)arg_user), sizeof(arg));
++            strncpy_from_user(arg, (const void __user *)untagged_addr((unsigned long)arg_user), sizeof(arg));
+         if (copied <= 0)
+             return ksu_sulog_copy_empty_string(dst);
+
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -23,6 +23,9 @@
+ #include "supercall/supercall.h"
+ #include "feature/uts_spoof.h"
+ #include "feature/cpu_spoof.h"
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_ksu_compat.h>
++#endif
+ #ifdef CONFIG_KPM
+ #include "kpm/kpm.h"
+ #endif

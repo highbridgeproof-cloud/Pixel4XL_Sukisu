@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ChatGPT <noreply@example.com>
+Date: Thu, 17 Sep 2026 03:00:00 +0900
+Subject: [PATCH 2/2] KernelSU: bridge SukiSU builtin SUSFS API to v1.5.5
+
+Target:
+  SukiSU-Ultra builtin (expects SUSFS v2.1.0 API)
+  SUSFS kernel-4.14 v1.5.5
+
+This is the compatibility layer used by QuartzWarrior's
+kernel_oneplus_sm8150-ksu tree. Existing v1.5.5 implementations are
+called through typed wrappers; newer v2.1.0-only operations become
+no-ops.
+
+Prerequisite:
+  SUSFS v1.5.5 kernel files are already copied into the kernel tree.
+  KernelSU/kernel/supercall/dispatch.c exists.
+
+---
+ include/linux/susfs_ksu_compat.h        | 61 +++++++++++++++++++++++++++++
+ KernelSU/kernel/supercall/dispatch.c    |  3 ++
+ 2 files changed, 64 insertions(+)
+
+diff --git a/include/linux/susfs_ksu_compat.h b/include/linux/susfs_ksu_compat.h
+new file mode 100644
+index 000000000000..000000000000
+--- /dev/null
++++ b/include/linux/susfs_ksu_compat.h
+@@ -0,0 +1,61 @@
++#ifndef KSU_SUSFS_COMPAT_H
++#define KSU_SUSFS_COMPAT_H
++/*
++ * Bridge header included only by SukiSU-Ultra dispatch.c.
++ * dispatch.c passes void __user ** but v1.5.5 susfs uses typed struct pointers.
++ * These static inlines perform the cast and stub out APIs not in v1.5.5.
++ */
++#include <linux/susfs.h>
++static inline void ksu_susfs_add_sus_path(void __user **p)
++{
++#ifdef CONFIG_KSU_SUSFS_SUS_PATH
++	susfs_add_sus_path((struct st_susfs_sus_path __user *)*p);
++#endif
++}
++static inline void ksu_susfs_add_sus_kstat(void __user **p)
++{
++#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++	susfs_add_sus_kstat((struct st_susfs_sus_kstat __user *)*p);
++#endif
++}
++static inline void ksu_susfs_update_sus_kstat(void __user **p)
++{
++#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++	susfs_update_sus_kstat((struct st_susfs_sus_kstat __user *)*p);
++#endif
++}
++static inline void ksu_susfs_set_uname(void __user **p)
++{
++#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++	susfs_set_uname((struct st_susfs_uname __user *)*p);
++#endif
++}
++static inline void ksu_susfs_set_cmdline(void __user **p)
++{
++#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++	susfs_set_cmdline_or_bootconfig((char __user *)*p);
++#endif
++}
++static inline void ksu_susfs_add_open_redirect(void __user **p)
++{
++#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
++	susfs_add_open_redirect((struct st_susfs_open_redirect __user *)*p);
++#endif
++}
++#define susfs_add_sus_path(p)                    ksu_susfs_add_sus_path(p)
++#define susfs_add_sus_path_loop(p)               do {} while(0)
++#define susfs_set_hide_sus_mnts_for_non_su_procs(p) do {} while(0)
++#define susfs_add_sus_kstat(p)                   ksu_susfs_add_sus_kstat(p)
++#define susfs_update_sus_kstat(p)                ksu_susfs_update_sus_kstat(p)
++#define susfs_set_uname(p)                       ksu_susfs_set_uname(p)
++#define susfs_enable_log(p)                      susfs_set_log(true)
++#define susfs_set_cmdline_or_bootconfig(p)       ksu_susfs_set_cmdline(p)
++#define susfs_add_open_redirect(p)               ksu_susfs_add_open_redirect(p)
++#define susfs_add_sus_map(p)                     do {} while(0)
++#define susfs_set_avc_log_spoofing(p)            do {} while(0)
++#define susfs_get_enabled_features(p)            do {} while(0)
++#define susfs_show_variant(p)                    do {} while(0)
++#define susfs_show_version(p)                    do {} while(0)
++#define susfs_start_sdcard_monitor_fn()          do {} while(0)
++#endif
+diff --git a/KernelSU/kernel/supercall/dispatch.c b/KernelSU/kernel/supercall/dispatch.c
+index 000000000000..000000000000 100644
+--- a/KernelSU/kernel/supercall/dispatch.c
++++ b/KernelSU/kernel/supercall/dispatch.c
+@@ -1,3 +1,6 @@
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_ksu_compat.h>
++#endif
++
+ 
